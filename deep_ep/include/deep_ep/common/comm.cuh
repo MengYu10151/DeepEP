@@ -94,38 +94,42 @@ __forceinline__ __device__ void nvlink_barrier_wo_local_sync(
     if (kNumSMs > 1 and sm_idx > 0)
         return;
 
-    // Read the current barrier phase first
-    const int status = static_cast<int>((*workspace.get_nvl_barrier_counter_ptr()) & 3);
-    const int phase = status & 1, sign = status >> 1;
+    // Read the current barrier phase
+    const int phase = static_cast<int>((*workspace.get_nvl_barrier_counter_ptr()) & 1);
 
+    // Each rank writes its own flag on every peer's memory via LSA symmetric pointer
+    // Uses per-rank flags instead of shared-counter atomics, so PCIe BAR works without atomic support
     EP_STATIC_ASSERT(kNumRanks <= kNumThreads, "Insufficient threads");
     if (thread_idx < kNumRanks) {
         const auto dst_ptr =
-            gin.get_sym_ptr<ncclTeamTagLsa>(workspace.get_nvl_barrier_signal_ptr(phase), thread_idx);
-        ptx::red_add_rel_sys(dst_ptr, sign ? -1 : 1);
+            gin.get_sym_ptr<ncclTeamTagLsa>(workspace.get_nvl_barrier_flag_ptr(phase, rank_idx), thread_idx);
+        ptx::st_release_sys(dst_ptr, 1);
     }
     __syncthreads();
 
-    // NOTES: we need `2^64 / 1e6 / 3600 / 24 / 365 = 571000` years to make the counter overflow (1 barrier per us)
-    // Add the phase counter
+    // Advance phase counter
     if (thread_idx == 0)
         atomicAdd(workspace.get_nvl_barrier_counter_ptr(), 1);
 
-    // Check timeout
-    const auto target = sign ? 0 : kNumRanks;
-    timeout_while<kNumTimeoutCycles>(thread_idx == 0, [=](const bool& is_last_check) {
-        const auto signal = ptx::ld_acquire_sys<int>(workspace.get_nvl_barrier_signal_ptr(phase));
-        if (signal == target)
-            return true;
+    // Wait for all ranks to arrive by polling local flags
+    if (thread_idx < kNumRanks) {
+        const auto local_flag_ptr = workspace.get_nvl_barrier_flag_ptr(phase, thread_idx);
+        timeout_while<kNumTimeoutCycles>([=](const bool& is_last_check) {
+            const auto flag = ptx::ld_acquire_sys<int>(local_flag_ptr);
+            if (flag == 1)
+                return true;
 
-        if (is_last_check) {
-            printf("DeepEP NVLink barrier timeout, tag: %d, nvl: %d, thread: %d, "
-                   "status: %d, signal: %d, phase: %d, target: %d, counter: %llu\n",
-                   kTag, rank_idx, thread_idx, status, signal, phase, target,
-                   *workspace.get_nvl_barrier_counter_ptr());
-        }
-        return false;
-    });
+            if (is_last_check) {
+                printf("DeepEP NVLink barrier timeout, tag: %d, nvl: %d, thread: %d, "
+                       "phase: %d, waiting_for_rank: %d, flag: %d\n",
+                       kTag, rank_idx, thread_idx, phase, thread_idx, flag);
+            }
+            return false;
+        });
+        // Reset flag for next use
+        *local_flag_ptr = 0;
+    }
+    __syncthreads();
 }
 
 template <int kNumRanks, int kNumSMs, int kNumThreads, int kNumQPs, int64_t kNumTimeoutCycles,

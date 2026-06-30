@@ -21,7 +21,8 @@ struct WorkspaceLayout {
     static constexpr int kNumMaxExpertsPerRank = 256;
     static constexpr int kNumMaxInflightAGRS = 32;
 
-    static constexpr int64_t kNumBarrierSignalBytes = 16;
+    // Barrier layout: 8B counter + 2 phases * kNumMaxRanks * 4B per-rank flags
+    static constexpr int64_t kNumBarrierSignalBytes = 8 + 2 * kNumMaxRanks * sizeof(int);
 
     __forceinline__ __device__ __host__
     WorkspaceLayout(void* workspace,
@@ -84,8 +85,9 @@ struct WorkspaceLayout {
         return static_cast<unsigned long long*>(workspace);
     }
 
-    __forceinline__ __device__ __host__ int* get_nvl_barrier_signal_ptr(const int& phase) const {
-        return math::advance_ptr<int>(workspace, (2 + phase) * sizeof(int));
+    __forceinline__ __device__ __host__ int* get_nvl_barrier_flag_ptr(const int& phase, const int& rank_idx) const {
+        // offset: 8B counter, then phase * kNumMaxRanks * 4B, then rank_idx * 4B
+        return math::advance_ptr<int>(workspace, 8 + (phase * kNumMaxRanks + rank_idx) * sizeof(int));
     }
 
     __forceinline__ __device__ __host__ int64_t* get_notify_reduction_workspace_ptr() const {
