@@ -6,7 +6,7 @@
 
 ### 硬件要求
 
-- NVIDIA H 系列 GPU（H100/H200/H800，SM 9.0）
+- NVIDIA GPU（SM 9.0+ ，如 H100/H200/H800/B200 等）
 - GPU 通过 PCIe 连接（不需要 NVLink）
 - 不需要 RDMA 网卡
 
@@ -235,7 +235,7 @@ echo "网卡流量: rx=$((RX_AFTER - RX_BEFORE))B tx=$((TX_AFTER - TX_BEFORE))B"
 
 ## 性能数据
 
-测试环境：8× NVIDIA H 系列 GPU（PCIe，无 NVLink），hidden=4096，topk=6，experts=256，num_sms=8。
+测试环境：8× NVIDIA GPU（SM 12.0 / Blackwell，PCIe，无 NVLink），8× ConnectX-8 400Gbps 网卡（测试中**未使用**，EP_DISABLE_GIN=1），hidden=4096，topk=6，experts=256，num_sms=8。
 
 ### Dispatch 带宽（GB/s）
 
