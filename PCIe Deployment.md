@@ -174,13 +174,13 @@ EP_DISABLE_GIN=1 NCCL_LSA_TEAM_SIZE=2 \
     --allow-hybrid-mode 0
 ```
 
-预期输出包含类似以下行：
-```
-[EP: Rank 0/2] Dispatch diff: xxx (< 0.01)
-[EP: Rank 0/2] Combine diff: xxx (< 0.01)
-```
+测试使用 `torch.equal`（逐比特精确匹配）校验 dispatch 和 combine 结果，不是近似比较。如果正确性校验失败，程序会报错退出；正常运行结束（exit code 0）即表示正确性全部通过。
 
-`diff` 值应很小（< 0.01），表示正确性通过。
+预期输出包含类似以下行（性能数据）：
+```
+   * EP:   0/2 | dispatch: 0 GB/s (SO), 56 GB/s (SU), ...
+   @ EP:   0/2 | combine: 0 GB/s (SO), 61 GB/s (SU), ...
+```
 
 ### 正确性验证（EP=4）
 
