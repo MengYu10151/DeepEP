@@ -19,13 +19,17 @@ nvidia-smi topo -m
 - GPU 之间为 `PXB` / `NODE` / `PHB` 连接 → 同一 LSA 域，EP 可以正常工作
 - `SYS` 连接（跨 NUMA）→ 可能不在同一 LSA 域内，跨这些 GPU 的 EP 可能失败
 
-支持的拓扑示例（所有 8 个 GPU 在 NUMA 0 上）：
+典型拓扑示例（8 卡，两个 NUMA 各 4 卡）：
 ```
-GPU0  GPU1  GPU2  GPU3  GPU4  GPU5  GPU6  GPU7
- └─PHB──┘    └─PHB──┘    └─PHB──┘    └─PHB──┘
-    └──NODE──┘               └──NODE──┘
-         └──────── NUMA 0 ────────┘
+        NUMA 0                          NUMA 1
+GPU0  GPU1  GPU2  GPU3          GPU4  GPU5  GPU6  GPU7
+ └─PXB──┘    └─PXB──┘           └─PXB──┘    └─PXB──┘
+    └──NODE──┘                      └──NODE──┘
+    └── LSA 域 0 ──┘                └── LSA 域 1 ──┘
+              └──────── SYS（跨 NUMA）────────┘
 ```
+
+在这种拓扑下，**EP=2 和 EP=4 可以正常运行**（同一 NUMA / LSA 域内），**EP=8 不可用**（跨 NUMA 的 SYS 连接不在同一 LSA 域内）。
 
 ### 软件要求
 
