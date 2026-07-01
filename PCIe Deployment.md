@@ -76,16 +76,51 @@ python -c "import torch; print(torch.__version__, torch.version.cuda)"
 
 ### 4. 安装 NCCL
 
-需要 NCCL ≥ 2.30（支持 LSA）。如果 PyTorch 自带兼容的 NCCL，可以直接使用；否则从 NVIDIA 包仓库安装或从源码编译。
+需要 NCCL ≥ 2.30（支持 LSA）。PyTorch pip 包自带的 NCCL 版本可能低于 2.30，需要检查并升级。
 
-设置 NCCL 路径：
+检查当前 NCCL 版本：
 ```bash
-export EP_NCCL_ROOT_DIR=/path/to/nccl
+python -c "
+from nvidia import nccl
+import os
+nccl_h = os.path.join(os.path.dirname(nccl.__file__), 'nccl', 'include', 'nccl.h')
+with open(nccl_h) as f:
+    for line in f:
+        if 'NCCL_VERSION_CODE' in line and '#define' in line:
+            ver = int(line.split()[-1])
+            print(f'NCCL version: {ver // 10000}.{(ver % 10000) // 100}.{ver % 100}')
+            break
+"
 ```
 
-如果 NCCL 随 PyTorch 一起安装，可以这样查找路径：
+如果版本 < 2.30，需要从源码编译 NCCL 2.30+：
 ```bash
-python -c "import torch; print(torch.utils.cpp_extension._find_nccl_root())"
+git clone https://github.com/NVIDIA/nccl.git
+cd nccl
+git checkout v2.30.7-1  # 或更高版本
+make -j$(nproc) src.build
+# 编译产物在 build/ 目录下
+```
+
+然后**替换** PyTorch pip 包中的 NCCL 库和头文件（编译和运行时必须使用同一版本，否则 DeepEP 会报版本不匹配错误）：
+```bash
+NCCL_PKG=$(python -c "import nvidia.nccl; import os; print(os.path.join(os.path.dirname(nvidia.nccl.__file__), 'nccl'))")
+
+# 备份原文件
+cp $NCCL_PKG/lib/libnccl.so.2 $NCCL_PKG/lib/libnccl.so.2.bak
+
+# 替换库文件
+cp /path/to/nccl/build/lib/libnccl.so.2.* $NCCL_PKG/lib/libnccl.so.2
+
+# 替换头文件
+cp /path/to/nccl/build/include/nccl.h $NCCL_PKG/include/
+cp /path/to/nccl/build/include/nccl_device.h $NCCL_PKG/include/
+cp -r /path/to/nccl/build/include/nccl_device/* $NCCL_PKG/include/nccl_device/
+```
+
+或者，设置环境变量指向自编译的 NCCL（仅影响编译路径，运行时仍需替换 pip 包中的 .so）：
+```bash
+export EP_NCCL_ROOT_DIR=/path/to/nccl/build
 ```
 
 ### 5. 安装 NVSHMEM
@@ -105,8 +140,10 @@ git clone https://github.com/MengYu10151/DeepEP.git
 cd DeepEP
 git checkout pcie-no-atomic
 
-pip install -e .
+pip install --no-build-isolation -e .
 ```
+
+> **注意**：必须加 `--no-build-isolation`，否则 pip 会在隔离环境中编译，找不到 PyTorch 导致报错 `No module named 'torch'`。
 
 编译需要几分钟。JIT 编译的内核会在首次运行时缓存。
 
