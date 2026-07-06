@@ -1,8 +1,6 @@
 #include <cstring>
-#include <memory>
 #include <vector>
 #include <string>
-#include <optional>
 #include <pybind11/pytypes.h>
 #include <pybind11/stl.h>
 #include <sstream>
@@ -61,9 +59,9 @@ std::tuple<int, int> get_logical_domain_size(const int64_t& nccl_comm, const boo
             allow_hybrid_mode ? num_nvl_ranks : num_rdma_ranks * num_nvl_ranks};
 }
 
-NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
+NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm, const symmetric::cpu_comm_t& cpu_comm,
                                                        const int& num_ranks, const int& rank_idx,
-                                                       const size_t& size, const size_t& alignment,
+                                                       const int64_t& num_bytes, const int64_t& num_cpu_bytes,
                                                        const bool& allow_hybrid_mode,
                                                        const bool& has_nvlink,
                                                        const int& sl_idx, const int& num_allocated_qps):
@@ -82,23 +80,20 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     if (get_env<int>("EP_BUFFER_DEBUG"))
         printf("EP NCCL device communicator has %d allocated QPs\n", num_allocated_qps);
 
-    // Query NCCL supported Gin Type
-    const bool gin_disabled = get_env("EP_DISABLE_GIN", 0) != 0;
-    if (not gin_disabled) {
+    // Initialize NCCL device communicator
+    ncclDevCommRequirements_t reqs = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
+    if (num_ranks > 1 and get_env("EP_DISABLE_GIN", 0) == 0) {
+        // Query NCCL supported Gin Type
         ncclCommProperties props = NCCL_COMM_PROPERTIES_INITIALIZER;
         NCCL_CHECK(ncclCommQueryProperties(comm, &props));
         EP_HOST_ASSERT(
             (allow_hybrid_mode ? props.railedGinType : props.ginType) != NCCL_GIN_TYPE_NONE and
             "NCCL GIN is unavailable. This is usually due to a network configuration issue, "
             "such as `allow_hybrid_mode=0` (disable direct RDMA kernels) in multi-plane network.");
-    }
 
-    // Initialize NCCL device communicator
-    ncclDevCommRequirements_t reqs = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
-    if (num_ranks > 1 and not gin_disabled) {
         reqs.ginContextCount = num_allocated_qps;
         reqs.ginExclusiveContexts = true;
-        reqs.ginQueueDepth = 1024;
+        reqs.ginQueueDepth = kGinQPDepth;
         reqs.ginTrafficClass = sl_idx;
         // Customized RDMA barrier needs extra signals
         reqs.ginSignalCount = num_ranks + 2 * 2;
@@ -141,12 +136,21 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     }
     is_scaleup_nvlink = num_scaleup_ranks == num_nvl_ranks;
 
+    // Create symmetric memory
+    // num_bytes = GPU + CPU, derive GPU portion
+    this->symmetric_memory = symmetric::alloc(
+        num_bytes - num_cpu_bytes, num_cpu_bytes,
+        allow_hybrid_mode, num_scaleup_ranks, scaleout_rank_idx,
+        cpu_comm);
+
     // Create window
     // NOTES: `ncclCommWindowRegister` is collective: it internally calls bootstrapBarrier
     // across all ranks, so no explicit barrier is needed after this call.
-    NCCL_CHECK(ncclMemAlloc(&raw_window_ptr, size));
-    NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, size, &window, NCCL_WIN_DEFAULT));
-    NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, lsa_rank_idx, &mapped_window_ptr));
+    raw_window_ptr = this->symmetric_memory->ptr;
+    this->num_gpu_bytes = this->symmetric_memory->num_gpu_bytes;
+    this->num_cpu_bytes = this->symmetric_memory->num_cpu_bytes;
+    NCCL_CHECK(ncclCommWindowRegister(comm, raw_window_ptr, this->symmetric_memory->num_bytes, &window, NCCL_WIN_STRICT_ORDERING));
+    NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, nvl_rank_idx, &mapped_window_ptr));
 
     // Get LSA pointers for all LSA peers
     nvl_window_ptrs.resize(num_lsa_ranks);
@@ -154,18 +158,13 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
         NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, i, &nvl_window_ptrs[i]));
 
     if (get_env<int>("EP_BUFFER_DEBUG")) {
-        printf("[DeepEP] Rank %d/%d: raw_window_ptr=%p, mapped_window_ptr=%p, lsa_rank_idx=%d, num_lsa_ranks=%d\n",
-               rank_idx, num_ranks, raw_window_ptr, mapped_window_ptr, lsa_rank_idx, num_lsa_ranks);
+        printf("[DeepEP] Rank %d/%d: raw_window_ptr=%p, mapped_window_ptr=%p, nvl_rank_idx=%d, num_lsa_ranks=%d\n",
+               rank_idx, num_ranks, raw_window_ptr, mapped_window_ptr, nvl_rank_idx, num_lsa_ranks);
         for (int i = 0; i < num_lsa_ranks; ++ i)
             printf("[DeepEP] Rank %d: nvl_window_ptrs[%d]=%p (diff from self=%ld)\n",
                    rank_idx, i, nvl_window_ptrs[i],
                    (long)(static_cast<uint8_t*>(nvl_window_ptrs[i]) - static_cast<uint8_t*>(mapped_window_ptr)));
     }
-
-    // TODO: push NCCL team to support aligned allocation
-    EP_HOST_ASSERT(size % alignment == 0);
-    EP_HOST_ASSERT(reinterpret_cast<uint64_t>(raw_window_ptr) % alignment == 0);
-    EP_HOST_ASSERT(reinterpret_cast<uint64_t>(mapped_window_ptr) % alignment == 0);
 }
 
 void* NCCLSymmetricMemoryContext::get_sym_ptr(void* ptr, const int& dst_rank_idx) const {
@@ -173,10 +172,10 @@ void* NCCLSymmetricMemoryContext::get_sym_ptr(void* ptr, const int& dst_rank_idx
     return static_cast<uint8_t*>(nvl_window_ptrs[dst_rank_idx]) + offset;
 }
 
-void NCCLSymmetricMemoryContext::finalize() const {
-    // Deregister window and free buffer
+void NCCLSymmetricMemoryContext::finalize() {
+    // Deregister window
     NCCL_CHECK(ncclCommWindowDeregister(comm, window));
-    NCCL_CHECK(ncclMemFree(raw_window_ptr));
+    symmetric_memory.reset();
 
     // Destroy device communicator
     NCCL_CHECK(ncclDevCommDestroy(comm, &dev_comm));

@@ -17,9 +17,12 @@ public:
     struct Args {
         // Templated arguments
         int num_entries_per_rank;
-        int hidden;
-        int num_ranks;
+        int num_hidden_bytes, num_sf_packs;
+        int num_entries_per_token;
+        int num_scaleout_ranks, num_scaleup_ranks;
+        int64_t num_cpu_bytes_per_rank;
         int num_qps;
+        bool allow_hybrid_mode;
 
         // Parameters
         ncclDevComm_t nccl_dev_comm;
@@ -28,23 +31,39 @@ public:
         void* fetched;
         int* indices;
         ncclGinRequest_t* last_gin_requests;
+        sf_pack_t* sf_table; sf_pack_t* fetched_sf;
+        int sf_token_stride; int sf_hidden_stride;
         int num_tokens;
 
         jit::LaunchArgs launch_args;
     };
 
     static std::string generate_impl(const Args& args) {
+        int num_rdma_peers, num_ranks_per_rdma_peer;
+        std::string team_tag;
+        if (args.allow_hybrid_mode) {
+            num_rdma_peers = args.num_scaleout_ranks;
+            num_ranks_per_rdma_peer = args.num_scaleup_ranks;
+            team_tag = "ncclTeamTagRail";
+        } else {
+            num_rdma_peers = args.num_scaleout_ranks * args.num_scaleup_ranks;
+            num_ranks_per_rdma_peer = 1;
+            team_tag = "ncclTeamTagWorld";
+        }
+        auto func_name = fmt::format("engram_fetch_impl<{}, {}, {}, {}, {}, {}, {}, {}, {}, {}>",
+            args.num_qps, args.num_entries_per_rank, args.num_hidden_bytes, args.num_sf_packs,
+            args.num_entries_per_token, num_rdma_peers, num_ranks_per_rdma_peer,
+            args.num_cpu_bytes_per_rank, args.launch_args.num_threads, team_tag);
+
         return fmt::format(R"(
 #include <deep_ep/impls/engram_fetch.cuh>
 
 using namespace deep_ep::elastic;
 
 static void __instantiate_kernel() {{
-    auto ptr = reinterpret_cast<void*>(&engram_fetch_impl<{}, {}, {}, {}, {}>);
+    auto ptr = reinterpret_cast<void*>(&{});
 }}
-)", args.num_qps,
-    args.num_entries_per_rank, args.hidden,
-    args.num_ranks, args.launch_args.num_threads);
+)", func_name);
     }
 
     static void launch_impl(const jit::KernelHandle& kernel, const jit::LaunchConfigHandle& config, Args args) {
@@ -54,6 +73,8 @@ static void __instantiate_kernel() {{
             args.storage, args.fetched,
             args.indices,
             args.last_gin_requests,
+            args.sf_table, args.fetched_sf,
+            args.sf_token_stride, args.sf_hidden_stride,
             args.num_tokens
         ));
     }
@@ -63,24 +84,40 @@ static void launch_engram_fetch(const ncclDevComm_t& nccl_dev_comm, const ncclWi
                                 void* storage, void* fetched,
                                 int* indices,
                                 ncclGinRequest_t* last_gin_requests,
-                                const int& num_entries_per_rank, const int& hidden,
+                                void* sf_table, void* fetched_sf,
+                                const int& sf_token_stride, const int& sf_hidden_stride,
+                                const int& num_entries_per_rank,
+                                const int& hidden, const int& elem_size, const int& num_sf_packs,
+                                const int& num_entries_per_token,
                                 const int& num_tokens,
-                                const int& num_ranks, const int& num_qps,
+                                const int& num_scaleout_ranks, const int& num_scaleup_ranks,
+                                const int64_t& num_cpu_bytes_per_rank,
+                                const int& num_qps,
+                                const bool& allow_hybrid_mode,
                                 const at::cuda::CUDAStream& stream) {
     constexpr int kNumEngramFetchThreads = 1024;
 
     // Generate, build and launch
     const EngramFetchRuntime::Args args = {
         .num_entries_per_rank = num_entries_per_rank,
-        .hidden = hidden,
-        .num_ranks = num_ranks,
+        .num_hidden_bytes = hidden * elem_size,
+        .num_sf_packs = num_sf_packs,
+        .num_entries_per_token = num_entries_per_token,
+        .num_scaleout_ranks = num_scaleout_ranks,
+        .num_scaleup_ranks = num_scaleup_ranks,
+        .num_cpu_bytes_per_rank = num_cpu_bytes_per_rank,
         .num_qps = num_qps,
+        .allow_hybrid_mode = allow_hybrid_mode,
         .nccl_dev_comm = nccl_dev_comm,
         .nccl_window = nccl_window,
         .storage = storage,
         .fetched = fetched,
         .indices = indices,
         .last_gin_requests = last_gin_requests,
+        .sf_table = static_cast<sf_pack_t*>(sf_table),
+        .fetched_sf = static_cast<sf_pack_t*>(fetched_sf),
+        .sf_token_stride = sf_token_stride,
+        .sf_hidden_stride = sf_hidden_stride,
         .num_tokens = num_tokens,
         .launch_args = jit::LaunchArgs(num_qps, kNumEngramFetchThreads)};
     const auto code = EngramFetchRuntime::generate(args);
@@ -92,7 +129,8 @@ class EngramFetchWaitRuntime final : public jit::LaunchRuntime<EngramFetchWaitRu
 public:
     struct Args {
         // Templated arguments
-        int num_ranks;
+        int num_scaleout_ranks, num_scaleup_ranks;
+        bool allow_hybrid_mode;
 
         ncclDevComm_t nccl_dev_comm;
         ncclWindow_t nccl_window;
@@ -102,15 +140,21 @@ public:
     };
 
     static std::string generate_impl(const Args& args) {
+        const int num_rdma_peers = args.allow_hybrid_mode
+            ? args.num_scaleout_ranks
+            : args.num_scaleout_ranks * args.num_scaleup_ranks;
+        auto func_name = fmt::format("engram_fetch_wait_impl<{}, {}>",
+            num_rdma_peers, args.launch_args.num_threads);
+
         return fmt::format(R"(
-#include <deep_ep/impls/engram_fetch.cuh>
+#include <deep_ep/impls/engram_fetch_wait.cuh>
 
 using namespace deep_ep::elastic;
 
 static void __instantiate_kernel() {{
-    auto ptr = reinterpret_cast<void*>(&engram_fetch_wait_impl<{}, {}>);
+    auto ptr = reinterpret_cast<void*>(&{});
 }}
-)", args.num_ranks, args.launch_args.num_threads);
+)", func_name);
     }
 
     static void launch_impl(const jit::KernelHandle& kernel, const jit::LaunchConfigHandle& config, Args args) {
@@ -124,13 +168,17 @@ static void __instantiate_kernel() {{
 
 static void launch_engram_fetch_wait(ncclGinRequest_t* last_gin_requests,
                                      const ncclDevComm_t& nccl_dev_comm, const ncclWindow_t& nccl_window,
-                                     const int& num_ranks, const int& num_qps,
+                                     const int& num_scaleout_ranks, const int& num_scaleup_ranks,
+                                     const int& num_qps,
+                                     const bool& allow_hybrid_mode,
                                      const at::cuda::CUDAStream& stream) {
     constexpr int kNumEngramFetchWaitThreads = 1024;
 
     // Generate, build and launch
     const EngramFetchWaitRuntime::Args args = {
-        .num_ranks = num_ranks,
+        .num_scaleout_ranks = num_scaleout_ranks,
+        .num_scaleup_ranks = num_scaleup_ranks,
+        .allow_hybrid_mode = allow_hybrid_mode,
         .nccl_dev_comm = nccl_dev_comm,
         .nccl_window = nccl_window,
         .last_gin_requests = last_gin_requests,
