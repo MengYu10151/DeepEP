@@ -198,6 +198,7 @@ dispatch_impl(
                     return false;
                 }, start_clock);
             }
+
             ptx::named_barrier<kNumNotifyThreads>(kNotifyBarrierIndex);
 
             // Reduce expert count and add stats
@@ -386,6 +387,7 @@ dispatch_impl(
                 __syncwarp();
             }
         }
+
     }
 
     // Barrier to ensure data arrival

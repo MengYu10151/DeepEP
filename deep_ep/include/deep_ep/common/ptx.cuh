@@ -93,6 +93,10 @@ __forceinline__ __device__ void tma_store_fence() {
     asm volatile("fence.proxy.async.shared::cta;");
 }
 
+__forceinline__ __device__ void tma_store_fence_global() {
+    asm volatile("fence.proxy.async.global;" ::: "memory");
+}
+
 template <int kNumRemainingWaits = 0>
 __forceinline__ __device__ void tma_store_wait() {
     asm volatile("cp.async.bulk.wait_group %0;" ::"n"(kNumRemainingWaits) : "memory");

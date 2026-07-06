@@ -153,6 +153,15 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     for (int i = 0; i < num_lsa_ranks; ++ i)
         NCCL_CHECK(ncclGetLsaDevicePointer(window, 0, i, &nvl_window_ptrs[i]));
 
+    if (get_env<int>("EP_BUFFER_DEBUG")) {
+        printf("[DeepEP] Rank %d/%d: raw_window_ptr=%p, mapped_window_ptr=%p, lsa_rank_idx=%d, num_lsa_ranks=%d\n",
+               rank_idx, num_ranks, raw_window_ptr, mapped_window_ptr, lsa_rank_idx, num_lsa_ranks);
+        for (int i = 0; i < num_lsa_ranks; ++ i)
+            printf("[DeepEP] Rank %d: nvl_window_ptrs[%d]=%p (diff from self=%ld)\n",
+                   rank_idx, i, nvl_window_ptrs[i],
+                   (long)(static_cast<uint8_t*>(nvl_window_ptrs[i]) - static_cast<uint8_t*>(mapped_window_ptr)));
+    }
+
     // TODO: push NCCL team to support aligned allocation
     EP_HOST_ASSERT(size % alignment == 0);
     EP_HOST_ASSERT(reinterpret_cast<uint64_t>(raw_window_ptr) % alignment == 0);

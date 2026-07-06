@@ -223,6 +223,10 @@ __forceinline__ __device__ void gpu_barrier(const handle::NCCLGin& gin,
     if constexpr (kFlushStores) {
         ptx::tma_store_commit();
         ptx::tma_store_wait();
+        // Bridge TMA async proxy → generic proxy ordering so that
+        // subsequent st.release.sys (barrier flag) is ordered after
+        // TMA stores to remote GPU memory over PCIe
+        ptx::tma_store_fence_global();
         __syncwarp();
     }
 
