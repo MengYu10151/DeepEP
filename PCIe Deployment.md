@@ -81,9 +81,8 @@ python -c "import torch; print(torch.__version__, torch.version.cuda)"
 检查当前 NCCL 版本：
 ```bash
 python -c "
-from nvidia import nccl
-import os
-nccl_h = os.path.join(os.path.dirname(nccl.__file__), 'nccl', 'include', 'nccl.h')
+import nvidia.nccl, os
+nccl_h = os.path.join(nvidia.nccl.__path__[0], 'include', 'nccl.h')
 with open(nccl_h) as f:
     for line in f:
         if 'NCCL_VERSION_CODE' in line and '#define' in line:
@@ -104,7 +103,7 @@ make -j$(nproc) src.build
 
 然后**替换** PyTorch pip 包中的 NCCL 库和头文件（编译和运行时必须使用同一版本，否则 DeepEP 会报版本不匹配错误）：
 ```bash
-NCCL_PKG=$(python -c "import nvidia.nccl; import os; print(os.path.join(os.path.dirname(nvidia.nccl.__file__), 'nccl'))")
+NCCL_PKG=$(python -c "import nvidia.nccl; print(nvidia.nccl.__path__[0])")
 
 # 备份原文件
 cp $NCCL_PKG/lib/libnccl.so.2 $NCCL_PKG/lib/libnccl.so.2.bak
@@ -123,15 +122,28 @@ cp -r /path/to/nccl/build/include/nccl_device/* $NCCL_PKG/include/nccl_device/
 export EP_NCCL_ROOT_DIR=/path/to/nccl/build
 ```
 
-### 5. 安装 NVSHMEM
+### 5. NVSHMEM
 
-DeepEP 的构建系统需要 NVSHMEM 头文件（用于 legacy 内核）。安装 NVSHMEM ≥ 2.11：
+NVSHMEM 头文件和库在编译时需要（用于 legacy 内核），纯 PCIe 模式运行时**不会使用** NVSHMEM。
 
+PyTorch ≥ 2.12 的 pip 包自带 `nvidia-nvshmem-cu13`，DeepEP 的构建系统会自动检测到，**无需手动安装或设置环境变量**。
+
+验证 NVSHMEM 已随 pip 安装：
+```bash
+python -c "import nvidia.nvshmem; print('NVSHMEM path:', nvidia.nvshmem.__path__[0])"
+```
+
+如果 PyTorch 版本较低未自带 NVSHMEM，需手动安装 NVSHMEM ≥ 2.11 并设置：
 ```bash
 export NVSHMEM_ROOT=/path/to/nvshmem
 ```
 
-> NVSHMEM 仅在编译时需要——纯 PCIe 模式运行时**不会使用** NVSHMEM。
+### 6. 安装其他依赖
+
+测试脚本需要 numpy：
+```bash
+pip install numpy
+```
 
 ## 编译安装
 
@@ -145,7 +157,12 @@ pip install --no-build-isolation -e .
 
 > **注意**：必须加 `--no-build-isolation`，否则 pip 会在隔离环境中编译，找不到 PyTorch 导致报错 `No module named 'torch'`。
 
-编译需要几分钟。JIT 编译的内核会在首次运行时缓存。
+编译需要几分钟。JIT 编译的内核会在首次运行时按需编译并缓存到 `~/.deep_ep/cache/`。
+
+> **更新代码后**：如果更新了 DeepEP 代码（如 `git pull`），建议清除 JIT 缓存以避免使用过期的编译产物：
+> ```bash
+> rm -rf ~/.deep_ep/cache/*
+> ```
 
 ## 配置
 
@@ -296,8 +313,14 @@ barrier 等待 peer rank 超时。检查 EP 组内所有 GPU 是否在同一 NCC
 忘记设置 `EP_DISABLE_GIN=1`。
 
 ### 编译失败 "No module named 'torch'"
-编译前先激活 conda 环境：
+确保使用 `--no-build-isolation` 选项编译：
 ```bash
 conda activate deepep
-pip install -e .
+pip install --no-build-isolation -e .
+```
+
+### JIT 编译失败 "Arguments mismatch for instruction 'mov'"
+JIT 缓存中有过期的编译产物。清除缓存后重试：
+```bash
+rm -rf ~/.deep_ep/cache/*
 ```
