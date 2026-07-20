@@ -105,7 +105,7 @@ NCCLSymmetricMemoryContext::NCCLSymmetricMemoryContext(const int64_t& nccl_comm,
     const int num_lsa_ranks = dev_comm.lsaSize, lsa_rank_idx = dev_comm.lsaRank;
 
     // Override NVL domain when no NVLink hardware exists
-    if (gin_disabled and not has_nvlink) {
+    if (get_env("EP_DISABLE_GIN", 0) != 0 and not has_nvlink) {
         // Pure PCIe mode: use LSA domain as NVLink domain, barrier uses
         // per-rank flag stores instead of atomics (no GIN/NVLink needed)
         num_nvl_ranks = num_lsa_ranks;

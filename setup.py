@@ -121,6 +121,7 @@ if __name__ == '__main__':
     sources.extend(['csrc/kernels/backend/nccl.cu'])
     include_dirs.extend([f'{nccl_root_dir}/include'])
     nccl_lib = get_nccl_lib_name(nccl_root_dir)
+    library_dirs.extend([f'{nccl_root_dir}/lib'])
     extra_link_args.extend([f'-l:{nccl_lib}', f'-Wl,-rpath,{nccl_root_dir}/lib'])
 
     # CUDA driver sources
